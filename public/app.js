@@ -54,14 +54,28 @@ async function handleFile(file) {
     formData.append('resume', file);
 
     const res = await fetch('/api/upload', { method: 'POST', body: formData });
-    const data = await res.json();
 
-    if (!res.ok || data.error) {
-      throw new Error(data.error || 'Something went wrong while parsing.');
+    // Read raw text first; only parse as JSON when the body is actually JSON
+    const rawText = await res.text();
+    let data = null;
+    try {
+      data = rawText ? JSON.parse(rawText) : null;
+    } catch {
+      // Server did not return JSON (e.g. stale/crashed server, proxy response)
+      throw new Error(
+        `Server returned HTTP ${res.status} with a non-JSON body: ${rawText.slice(0, 200) || '(empty response)'}`
+      );
+    }
+
+    if (!res.ok || (data && data.error)) {
+      throw new Error(
+        (data && data.error) ||
+          `Upload failed with HTTP ${res.status}: ${rawText.slice(0, 200) || '(empty response)'}`
+      );
     }
     renderResults(data);
   } catch (err) {
-    showError(err.message);
+    showError(String(err && err.message ? err.message : err));
   } finally {
     setLoading(false);
   }

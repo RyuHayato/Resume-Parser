@@ -91,6 +91,8 @@ app.post('/api/upload', upload.single('resume'), async (req, res) => {
     }
 
     if (code !== 0 || parsed.error) {
+      console.error(`[parser] exit code ${code}, error: ${parsed.error || 'none'}`);
+      console.error(`[parser] stderr: ${stderr.trim()}`);
       return res.status(422).json({
         error: parsed.error || 'Failed to parse the resume.',
         stderr: stderr.trim(),
