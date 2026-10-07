@@ -10,14 +10,18 @@ const PORT = process.env.PORT || 3000;
 
 const ROOT = path.join(__dirname, '..');
 const UPLOADS_DIR = path.join(ROOT, 'uploads');
-const PYTHON_BIN = path.join(ROOT, 'venv', 'Scripts', 'python.exe');
 const PARSE_SCRIPT = path.join(ROOT, 'scripts', 'parse_resume.py');
+
+// Dynamically resolve the virtual environment's Python binary per-platform
+const VENV_PYTHON =
+  process.platform === 'win32'
+    ? path.join(ROOT, 'venv', 'Scripts', 'python.exe')
+    : path.join(ROOT, 'venv', 'bin', 'python');
 
 app.use(cors());
 app.use(express.json());
 app.use(express.static(path.join(ROOT, 'public')));
 
-// Ensure uploads directory exists
 if (!fs.existsSync(UPLOADS_DIR)) {
   fs.mkdirSync(UPLOADS_DIR, { recursive: true });
 }
@@ -46,44 +50,61 @@ app.get('/api/health', (req, res) => {
   res.json({ status: 'ok' });
 });
 
-app.post('/api/upload', upload.single('resume'), (req, res) => {
-  if (!req.file) {
-    return res.status(400).json({ error: 'No file uploaded. Attach a PDF with field name "resume".' });
-  }
-
-  const filePath = req.file.path;
-  const python = fs.existsSync(PYTHON_BIN) ? PYTHON_BIN : 'python';
-  const child = spawn(python, [PARSE_SCRIPT, filePath], { cwd: ROOT });
-
-  let stdout = '';
-  let stderr = '';
-  child.stdout.on('data', (d) => (stdout += d.toString()));
-  child.stderr.on('data', (d) => (stderr += d.toString()));
-
-  child.on('error', (err) => {
-    cleanup();
-    res.status(500).json({ error: `Failed to start parser: ${err.message}` });
+function runParser(pythonBin, scriptPath, filePath) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(pythonBin, [scriptPath, filePath], { cwd: ROOT });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (d) => (stdout += d.toString()));
+    child.stderr.on('data', (d) => (stderr += d.toString()));
+    child.on('error', (err) => reject(new Error(`${err.message} | stderr: ${stderr}`)));
+    child.on('close', (code) => resolve({ code, stdout, stderr }));
   });
+}
 
-  child.on('close', (code) => {
-    cleanup();
+app.post('/api/upload', upload.single('resume'), async (req, res) => {
+  const filePath = req.file ? req.file.path : null;
+
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: 'No file uploaded. Attach a PDF with field name "resume".' });
+    }
+
+    // Verify the venv Python exists before spawning
+    if (!fs.existsSync(VENV_PYTHON)) {
+      return res.status(500).json({
+        error: `Virtual environment Python not found at: ${VENV_PYTHON}`,
+        stderr: 'Environment detection failed - create the venv (python -m venv venv) and install requirements.',
+      });
+    }
+
+    const { code, stdout, stderr } = await runParser(VENV_PYTHON, PARSE_SCRIPT, req.file.path);
+
     let parsed;
     try {
       parsed = JSON.parse(stdout);
     } catch {
       return res.status(500).json({
         error: 'Parser returned invalid output.',
-        details: (stderr || stdout).trim(),
+        stderr: stderr.trim() || stdout.trim(),
       });
     }
-    if (code !== 0 || parsed.error) {
-      return res.status(422).json({ error: parsed.error || 'Failed to parse the resume.' });
-    }
-    res.json(parsed);
-  });
 
-  function cleanup() {
-    fs.unlink(filePath, () => {});
+    if (code !== 0 || parsed.error) {
+      return res.status(422).json({
+        error: parsed.error || 'Failed to parse the resume.',
+        stderr: stderr.trim(),
+      });
+    }
+
+    return res.json(parsed);
+  } catch (err) {
+    return res.status(500).json({ error: 'Execution crash while running the parser.', stderr: String(err.message || err) });
+  } finally {
+    // Guarantee the uploaded PDF is wiped whether parsing succeeded or crashed
+    if (filePath) {
+      fs.unlink(filePath, () => {});
+    }
   }
 });
 

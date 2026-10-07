@@ -18,21 +18,29 @@ except Exception:
     NLP = None
 
 
-SKILLS_DICTIONARY = [
-    "python", "javascript", "typescript", "java", "c++", "c#", "c", "ruby", "go", "rust",
-    "php", "swift", "kotlin", "r", "sql", "html", "css", "tailwind", "bootstrap",
-    "react", "angular", "vue", "node.js", "nodejs", "express", "django", "flask",
-    "spring", "fastapi", "rails", "laravel", "docker", "kubernetes", "aws", "azure",
-    "gcp", "git", "github", "jenkins", "ci/cd", "linux", "mongodb", "mysql",
-    "postgresql", "redis", "graphql", "rest api", "machine learning", "deep learning",
-    "nlp", "spacy", "nltk", "tensorflow", "pytorch", "pandas", "numpy", "excel",
-    "power bi", "tableau", "figma", "photoshop", "agile", "scrum", "jenkins",
-    "selenium", "pytest", "unittest", "jest", "webpack", "vite", "next.js", "nuxt",
+# Pre-defined technical skill terms cross-referenced against the resume text
+SKILLS_KEYWORDS = [
+    "python", "javascript", "typescript", "java", "c++", "c#", "ruby", "go",
+    "rust", "php", "swift", "kotlin", "r", "sql", "html", "css", "react",
+    "angular", "vue", "node.js", "nodejs", "express", "django", "flask",
+    "spring", "fastapi", "rails", "laravel", "docker", "kubernetes", "aws",
+    "azure", "gcp", "git", "github", "jenkins", "linux", "mongodb", "mysql",
+    "postgresql", "redis", "graphql", "rest api", "machine learning",
+    "deep learning", "nlp", "spacy", "nltk", "tensorflow", "pytorch",
+    "pandas", "numpy", "excel", "power bi", "tableau", "figma", "agile",
+    "scrum", "selenium", "pytest", "jest", "webpack", "next.js",
+    "project management", "time management", "team leadership", "communication",
 ]
 
-EMAIL_REGEX = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+# Layout-proof patterns: tolerate dashes, dots, spaces, parentheses, country codes
+EMAIL_REGEX = re.compile(
+    r"[A-Za-z0-9._%+-]+\s*@\s*[A-Za-z0-9.-]+\s*\.\s*[A-Za-z]{2,}"
+)
 PHONE_REGEX = re.compile(
-    r"(?:\+?\d{1,3}[\s.-]?)?(?:\(?\d{3}\)?[\s.-]?)?\d{3}[\s.-]?\d{4}"
+    r"(?:\+?\d{1,3}[\s().-]*)?"          # optional country code
+    r"(?:\(\d{2,4}\)[\s().-]*|\d{2,4}[\s().-]*)"  # area code, parens or not
+    r"\d{3,4}[\s().-]*"
+    r"\d{4}"
 )
 
 SECTION_HEADERS = [
@@ -59,7 +67,7 @@ def extract_text(pdf_path: str) -> str:
 
 def extract_email(text: str):
     match = EMAIL_REGEX.search(text)
-    return match.group(0) if match else None
+    return re.sub(r"\s+", "", match.group(0)) if match else None
 
 
 def extract_phone(text: str):
@@ -68,48 +76,34 @@ def extract_phone(text: str):
 
 
 def extract_name(text: str):
-    header_words = {h.lower() for h in SECTION_HEADERS}
-    # Heuristic: first non-empty line that looks like a person's name
-    for line in text.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        if EMAIL_REGEX.search(line) or PHONE_REGEX.search(line):
-            continue
-        words = line.split()
-        if (
-            1 < len(words) <= 5
-            and not any(ch.isdigit() for ch in line)
-            and line.lower() not in header_words
-            and all(re.match(r"^[A-Za-z.'-]+$", w) for w in words)
-        ):
-            return line
-        break
-    # Fallback: spaCy PERSON entities in the first part of the document
+    # Primary: spaCy NER PERSON entity
     if NLP is not None:
         doc = NLP(text[:1500])
         for ent in doc.ents:
             if ent.label_ == "PERSON":
                 candidate = " ".join(ent.text.split())
-                words = candidate.split()
                 if (
-                    1 < len(words) <= 4
+                    1 < len(candidate.split()) <= 4
                     and not re.search(r"(?i)email|phone|summary|skills|work", candidate)
                 ):
                     return candidate
+    # Fallback: assume the first non-empty line of the payload is the name
+    for line in text.splitlines():
+        line = line.strip()
+        if line:
+            return line
     return None
 
 
 def extract_skills(text: str):
-    found = []
     lowered = text.lower()
-    for skill in SKILLS_DICTIONARY:
+    found = []
+    for skill in SKILLS_KEYWORDS:
         pattern = r"(?<![A-Za-z0-9+#])" + re.escape(skill.lower()) + r"(?![A-Za-z0-9+#])"
         if re.search(pattern, lowered):
             found.append(skill)
-    # Preserve original dictionary order, de-duped
-    seen = set()
-    ordered = []
+    # De-duplicate while preserving keyword order
+    seen, ordered = set(), []
     for s in found:
         if s not in seen:
             seen.add(s)
@@ -145,11 +139,9 @@ def extract_work_experience(text: str):
     section = find_section(text, EXPERIENCE_HEADERS)
     if not section:
         return None
-    # Split into individual blocks on blank lines
     blocks = [b.strip() for b in re.split(r"\n\s*\n", section) if b.strip()]
     if len(blocks) > 1:
         return blocks
-    # Fallback: split on lines that look like job headers containing a year/date range
     lines = [l.strip() for l in section.splitlines() if l.strip()]
     grouped, current = [], []
     for line in lines:
